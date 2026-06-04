@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ヘルプ管理（講師）</title>
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Helvetica Neue',Arial,sans-serif;background:#0f172a;color:#e2e8f0;padding:20px;}
+header{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;flex-wrap:wrap;gap:12px;}
+header h1{font-size:20px;font-weight:700;}
+.badges{display:flex;gap:10px;align-items:center;flex-wrap:wrap;}
+.badge{padding:4px 14px;border-radius:20px;font-size:13px;font-weight:600}
+.badge-count{background:#1e3a5f;color:#60a5fa}
+.badge-refresh{background:#1a2e1a;color:#86efac;font-size:11px}
+.btn-csv{
+  background:#10b981;color:#fff;border:none;padding:6px 14px;border-radius:20px;
+  font-size:13px;font-weight:700;cursor:pointer;transition:all .15s;text-decoration:none;display:inline-block;
+}
+.btn-csv:hover{background:#059669;}
+.btn-csv:active{transform:scale(.96);}
+.select-period{
+  background:#1e293b;color:#e2e8f0;border:1px solid #475569;padding:6px 12px;
+  border-radius:20px;font-size:13px;font-weight:600;outline:none;cursor:pointer;
+}
+.select-period:focus{border-color:#3b82f6;}
+table{width:100%;border-collapse:collapse;font-size:14px}
+thead tr{background:#1e293b;color:#94a3b8;border-bottom:2px solid #334155}
+th,td{padding:12px 16px;text-align:left;}
+tbody tr{border-bottom:1px solid #334155;background:#1e293b;}
+.order{display:inline-block;width:24px;height:24px;border-radius:50%;text-align:center;line-height:24px;font-weight:700;font-size:12px}
+.order-1{background:#ef4444;color:#fff}
+.order-2{background:#f97316;color:#fff}
+.order-3{background:#eab308;color:#000}
+.order-n{background:#475569;color:#cbd5e1}
+.ts{color:#94a3b8;}
+.room-chip{background:#38bdf8;color:#0369a1;padding:4px 10px;border-radius:6px;font-weight:700;}
+.period-chip{background:#fef3c7;color:#d97706;padding:4px 10px;border-radius:6px;font-weight:700;font-size:13px}
+.status-badge{display:inline-block;padding:4px 10px;border-radius:6px;font-size:12px;font-weight:700}
+.status-waiting{background:#fef3c7;color:#d97706}
+.status-progress{background:#dbeafe;color:#2563eb}
+.status-done{background:#d1fae5;color:#059669}
+.btn-action{border:none;padding:8px 14px;border-radius:6px;font-size:13px;font-weight:700;cursor:pointer;}
+.btn-progress{background:#2563eb;color:#fff}
+.btn-done{background:#059669;color:#fff}
+.done-row{opacity:.5;background:#0f172a}
+.countdown{font-size:11px;color:#94a3b8;margin-top:2px}
+.empty-state{text-align:center;padding:60px 20px;color:#64748b;background:#1e293b;border-radius:8px;}
+</style>
+</head>
+<body>
+<header>
+  <h1 id="mainTitle">ヘルプ管理（講師用）</h1>
+  <div class="badges">
+    <select id="filterPeriod" class="select-period" onchange="onFilterChange()">
+      <option value="all">🌐 すべての時限を表示</option>
+      <option value="1">1 限目のみ</option>
+      <option value="2">2 限目のみ</option>
+      <option value="3">3 限目のみ</option>
+      <option value="4">4 限目のみ</option>
+      <option value="5">5 限目のみ</option>
+      <option value="6">6 限目のみ</option>
+      <option value="7">7 限目のみ</option>
+      <option value="8">8 限目のみ</option>
+    </select>
+    <a href="/teacher/csv-history" class="btn-csv" style="background:#3b82f6;">📋 過去の履歴一覧</a>
+    <a href="/download_csv" class="btn-csv">📥 データをCSV出力</a>
+    <span class="badge badge-refresh">● リアルタイム同期中</span>
+    <span class="badge badge-count">待機件数: <span id="waitCount">0</span> 件</span>
+    <span style="font-size:12px;color:#64748b" id="lastUpdate">最終更新: —</span>
+  </div>
+</header>
+<div class="empty-state" id="emptyState" style="display:none">現在、指定された時限のヘルプはありません。</div>
+<table id="helpTable">
+  <thead>
+    <tr>
+      <th style="width:60px">順番</th>
+      <th style="width:100px">時刻</th>
+      <th style="width:110px">時限</th>
+      <th style="width:110px">場所</th>
+      <th>名前</th>
+      <th style="width:100px">状態</th>
+      <th style="width:180px">操作</th>
+    </tr>
+  </thead>
+  <tbody id="helpBody"></tbody>
+</table>
+<script>
+const urlParams = new URLSearchParams(window.location.search);
+const classId = urlParams.get("class") || "default";
+
+const socket = io();
+let prevWaitCount = 0;
+let audioCtx = null;
+const doneTimestamps = {};
+let latestFullList = [];
+
+window.addEventListener("load", () => {
+  document.getElementById("mainTitle").textContent = `ヘルプ管理（部屋: ${classId}）`;
+  socket.emit('join_class', { classId: classId });
+  setInterval(updateCountdowns, 1000);
+});
+
+socket.on('update_data', (data) => {
+  latestFullList = data.list || [];
+  renderTable();
+  document.getElementById("lastUpdate").textContent = "最終更新: " + new Date().toLocaleTimeString("ja-JP");
+});
+
+function onFilterChange() {
+  renderTable();
+}
+
+function renderTable() {
+  const tbody = document.getElementById("helpBody");
+  const empty = document.getElementById("emptyState");
+  const table = document.getElementById("helpTable");
+  const filterValue = document.getElementById("filterPeriod").value;
+
+  let filteredList = latestFullList;
+  if (filterValue !== "all") {
+    const selectedPeriod = parseInt(filterValue);
+    filteredList = latestFullList.filter(item => item.period === selectedPeriod);
+  }
+
+  const totalWaitCount = latestFullList.filter(r => r.status === "待機中").length;
+  document.getElementById("waitCount").textContent = totalWaitCount;
+
+  if (totalWaitCount > prevWaitCount) {
+    playBeep();
+    document.title = `🔔 [${classId}] ヘルプ ${totalWaitCount}件`;
+  } else if (totalWaitCount === 0) {
+    document.title = `ヘルプ管理 [${classId}]`;
+  }
+  prevWaitCount = totalWaitCount;
+
+  if (filteredList.length === 0) {
+    tbody.innerHTML = "";
+    table.style.display = "none";
+    empty.style.display = "block";
+    return;
+  }
+  table.style.display = "table";
+  empty.style.display = "none";
+
+  let orderNum = 0;
+  tbody.innerHTML = filteredList.map(item => {
+    const isWaiting  = item.status === "待機中";
+    const isProgress = item.status === "対応中";
+    const isDone     = item.status === "対応済み";
+
+    let orderHtml = '<span class="order order-n">—</span>';
+    if (isWaiting) {
+      orderNum++;
+      const cls = orderNum === 1 ? "order-1" : orderNum === 2 ? "order-2" : orderNum === 3 ? "order-3" : "order-n";
+      orderHtml = `<span class="order ${cls}">${orderNum}</span>`;
+    }
+    const statusCls = isWaiting  ? "status-waiting" : isProgress ? "status-progress" : "status-done";
+
+    let btnHtml = "";
+    if (isWaiting) {
+      btnHtml = `<button class="btn-action btn-progress" onclick="doProgress(${item.rowIndex}, this)">▶ 対応中にする</button>`;
+    } else if (isProgress) {
+      btnHtml = `<button class="btn-action btn-done" onclick="doDone(${item.rowIndex}, this)">✅ 対応済みにする</button>`;
+    } else if (isDone) {
+      if (!doneTimestamps[item.rowIndex] && item.completedAt) { doneTimestamps[item.rowIndex] = item.completedAt; }
+      btnHtml = `<div><span style="color:#6ee7b7;font-size:12px">✅ 完了 ${item.completedAt || ""}</span><div class="countdown" id="cd-${item.rowIndex}"></div></div>`;
+    }
+
+    return `<tr class="${isDone ? 'done-row' : ''}" data-row="${item.rowIndex}" data-status="${item.status}">
+      <td>${orderHtml}</td>
+      <td><span class="ts">${item.timestamp}</span></td>
+      <td><span class="period-chip">${item.period} 限目</span></td>
+      <td><span class="room-chip">ルーム ${item.room}</span></td>
+      <td>${esc(item.name || "（未入力）")}</td>
+      <td><span class="status-badge ${statusCls}">${item.status}</span></td>
+      <td>${btnHtml}</td>
+    </tr>`;
+  }).join("");
+
+  updateCountdowns();
+}
+
+function doProgress(rowIndex, btn) { btn.disabled = true; socket.emit('request_progress', { classId: classId, rowIndex: rowIndex }); }
+function doDone(rowIndex, btn) { btn.disabled = true; socket.emit('request_done', { classId: classId, rowIndex: rowIndex }); }
+
+function updateCountdowns() {
+  const rows = document.querySelectorAll("tr[data-status='対応済み']");
+  rows.forEach(row => {
+    const rowIndex = row.dataset.row;
+    const cdEl = document.getElementById("cd-" + rowIndex);
+    if (!cdEl) return;
+    const completedStr = doneTimestamps[rowIndex];
+    if (!completedStr) return;
+    const today = new Date();
+    const parts = completedStr.split(":");
+    const completedDate = new Date(today.getFullYear(), today.getMonth(), today.getDate(), parseInt(parts[0]), parseInt(parts[1]), parseInt(parts[2]));
+    const elapsed = Date.now() - completedDate.getTime();
+    const remaining = (5 * 60 * 1000) - elapsed;
+    if (remaining > 0) {
+      const m = Math.floor(remaining / 60000); const s = Math.floor((remaining % 60000) / 1000);
+      cdEl.textContent = `${m}分${s}秒後に画面から消えます`;
+    } else { cdEl.textContent = "まもなく削除されます"; }
+  });
+}
+function playBeep() { if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)(); const osc = audioCtx.createOscillator(); const gain = audioCtx.createGain(); osc.connect(gain); gain.connect(audioCtx.destination); osc.type = "sine"; osc.frequency.setValueAtTime(880, audioCtx.currentTime); gain.gain.setValueAtTime(0.3, audioCtx.currentTime); gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.4); osc.start(); osc.stop(audioCtx.currentTime + 0.4); }
+function esc(s) { return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
+</script>
+</body>
+</html>

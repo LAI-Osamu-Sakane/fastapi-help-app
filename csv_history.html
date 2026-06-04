@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>過去のヘルプ履歴（CSV一覧）</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Helvetica Neue',Arial,sans-serif;background:#0f172a;color:#e2e8f0;padding:20px;}
+.container{max-width:800px;margin:0 auto;}
+header{display:flex;align-items:center;justify-content:space-between;margin-bottom:30px;border-bottom:1px solid #334155;padding-bottom:16px;}
+header h1{font-size:20px;font-weight:700;}
+.btn-back{
+  background:#475569;color:#fff;border:none;padding:6px 14px;border-radius:20px;
+  font-size:13px;font-weight:700;cursor:pointer;text-decoration:none;display:inline-block;
+}
+.btn-back:hover{background:#334155;}
+.csv-list{background:#1e293b;border-radius:8px;overflow:hidden;}
+.csv-item{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:16px 20px;border-bottom:1px solid #334155;transition:background .15s;
+}
+.csv-item:last-child{border-bottom:none;}
+.csv-item:hover{background:#1e293b;background-color:rgba(255,255,255,0.02)}
+.file-info{display:flex;flex-direction:column;gap:4px;}
+.file-name{font-weight:600;color:#f8fafc;font-size:15px;}
+.file-meta{font-size:12px;color:#94a3b8;}
+.btn-download{
+  background:#10b981;color:#fff;border:none;padding:8px 16px;border-radius:6px;
+  font-size:13px;font-weight:700;cursor:pointer;text-decoration:none;display:inline-block;
+}
+.btn-download:hover{background:#059669;}
+.empty-state{text-align:center;padding:40px 20px;color:#64748b;}
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <h1>📋 過去の日別ヘルプ履歴 (CSV一覧)</h1>
+    <a href="/teacher" class="btn-back">◀ リアルタイム管理へ戻る</a>
+  </header>
+
+  <div class="csv-list" id="csvList">
+    </div>
+</div>
+
+<script>
+window.addEventListener("load", async () => {
+  const response = await fetch('/api/csv-files');
+  const files = await response.json();
+  const listEl = document.getElementById("csvList");
+
+  if (!files || files.length === 0) {
+    listEl.innerHTML = '<div class="empty-state">自動保存された過去のCSVログはまだありません。<br>(毎日夜0時に自動的にここに蓄積されます)</div>';
+    return;
+  }
+
+  listEl.innerHTML = files.map(file => {
+    return `
+      <div class="csv-item">
+        <div class="file-info">
+          <div class="file-name">📄 ${file.filename}</div>
+          <div class="file-meta">データサイズ: ${file.size}</div>
+        </div>
+        <a href="/api/download-csv/${file.filename}" class="btn-download">📥 ダウンロード</a>
+      </div>
+    `;
+  }).join("");
+});
+</script>
+</body>
+</html>

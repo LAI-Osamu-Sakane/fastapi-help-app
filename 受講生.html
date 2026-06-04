@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>受講生ヘルプ送信</title>
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Helvetica Neue',Arial,sans-serif;background:#0f172a;color:#e2e8f0;display:flex;justify-content:center;align-items:center;min-height:100vh;padding:20px}
+.card{background:#1e293b;padding:30px;border-radius:12px;box-shadow:0 10px 25px -5px rgba(0,0,0,0.3);width:100%;max-width:400px}
+h1{font-size:20px;font-weight:700;margin-bottom:24px;text-align:center;color:#f8fafc}
+.form-group{margin-bottom:18px}
+label{display:block;font-size:13px;font-weight:600;margin-bottom:6px;color:#94a3b8}
+select,input[type="text"]{width:100%;padding:10px 14px;background:#0f172a;border:1px solid #334155;border-radius:6px;color:#fff;font-size:15px;outline:none;transition:border-color .15s}
+select:focus,input[type="text"]:focus{border-color:#3b82f6}
+.btn{width:100%;padding:12px;border:none;border-radius:6px;font-size:15px;font-weight:700;cursor:pointer;transition:all .15s;margin-top:10px}
+.btn-primary{background:#3b82f6;color:#fff}
+.btn-primary:hover{background:#2563eb}
+.btn-primary:disabled{background:#475569;color:#94a3b8;cursor:not-allowed}
+.btn-danger{background:#ef4444;color:#fff;display:none}
+.btn-danger:hover{background:#dc2626}
+.status-box{margin-top:20px;padding:12px;border-radius:6px;font-size:14px;text-align:center;font-weight:600;display:none}
+.status-info{background:#1e3a5f;color:#60a5fa;display:block}
+.status-success{background:#14532d;color:#4ade80;display:block}
+.status-warning{background:#7c2d12;color:#fdba74;display:block}
+.status-error{background:#7f1d1d;color:#fca5a5;display:block}
+.info-footer{margin-top:24px;text-align:center;font-size:12px;color:#64748b;border-top:1px solid #334155;padding-top:16px}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1 id="pageTitle">🙋‍♂️ ヘルプを送信する</h1>
+
+  <div class="form-group">
+    <label for="selectPeriod">時限（限目）</label>
+    <select id="selectPeriod"></select>
+  </div>
+  <div class="form-group">
+    <label for="selectRoom">あなたの場所（ルーム番号）</label>
+    <select id="selectRoom"></select>
+  </div>
+  <div class="form-group">
+    <label for="studentName">お名前（任意）</label>
+    <input type="text" id="studentName" placeholder="例: 山田 太郎">
+  </div>
+
+  <button class="btn btn-primary" id="btnHelp" onclick="doHelp()">🙋‍♂️ ヘルプを求める</button>
+  <button class="btn btn-danger" id="btnCancel" onclick="doCancel()">❌ ヘルプを取り消す</button>
+
+  <div class="status-box" id="statusBox">情報を読み込み中...</div>
+  <div id="waitPos" style="text-align:center; font-size:13px; color:#fdba74; margin-top:8px; display:none; font-weight:bold;"></div>
+
+  <div class="info-footer">
+    クラス全体の現在の待機数: <span id="waitCount" style="font-weight:700;color:#fff">0</span> 件
+  </div>
+</div>
+
+<script>
+const urlParams = new URLSearchParams(window.location.search);
+const classId = urlParams.get("class") || "default";
+
+const socket = io();
+let isWaiting = false;
+let currentSelectedRoom = 1;
+
+window.addEventListener("load", () => {
+  // 画面タイトルの書き換え
+  document.getElementById("pageTitle").textContent = `🙋‍♂️ ヘルプ送信 (${classId})`;
+
+  const periodSelect = document.getElementById("selectPeriod");
+  for(let p=1; p<=8; p++) periodSelect.options.add(new Option(`${p} 限目`, p));
+
+  const roomSelect = document.getElementById("selectRoom");
+  for(let r=1; r<=100; r++) roomSelect.options.add(new Option(`ルーム ${r}`, r));
+
+  const paramRoom = parseInt(urlParams.get("room")) || 1;
+  const paramPeriod = parseInt(urlParams.get("period")) || 1;
+  periodSelect.value = paramPeriod;
+  roomSelect.value = paramRoom;
+
+  document.getElementById("studentName").value = urlParams.get("name") || "";
+
+  // サーバーへ部屋の参加を通知
+  socket.emit('join_class', { classId: classId });
+
+  // 初期状態をクリア
+  showStatus("info", "接続完了。ヘルプが必要な時はボタンを押してください。");
+
+  // 定期的な同期
+  setInterval(() => {
+    socket.emit('check_timeout', { classId: classId });
+  }, 1000);
+});
+
+function doHelp() {
+  const period = parseInt(document.getElementById("selectPeriod").value);
+  const room = parseInt(document.getElementById("selectRoom").value);
+  const nameInput = document.getElementById("studentName").value.trim();
+  const btn = document.getElementById("btnHelp");
+
+  currentSelectedRoom = room;
+  btn.disabled = true;
+  document.getElementById("selectPeriod").disabled = true;
+  document.getElementById("selectRoom").disabled = true;
+  showStatus("info", "送信中...");
+
+  socket.emit('request_help', { classId: classId, room: room, period: period, name: nameInput });
+}
+
+socket.on('help_response', (data) => {
+  const btn = document.getElementById("btnHelp");
+  if (data.ok) {
+    isWaiting = true;
+    showStatus("warning", "⏳ 講師の対応を待っています...");
+    document.getElementById("btnCancel").style.display = "inline-block";
+  } else {
+    unlockInputs();
+    if (data.reason === "already_waiting") {
+      showStatus("error", "既に同じルームからヘルプが出されています。");
+    } else {
+      showStatus("error", "登録に失敗しました。");
+    }
+  }
+});
+
+function doCancel() {
+  if (!confirm("ヘルプを取り消しますか？")) return;
+  socket.emit('request_cancel', { classId: classId, room: currentSelectedRoom });
+  isWaiting = false;
+  unlockInputs();
+  document.getElementById("btnCancel").style.display = "none";
+  document.getElementById("waitPos").style.display = "none";
+  showStatus("success", "ヘルプをキャンセルしました。");
+}
+
+socket.on('update_data', (data) => {
+  const list = data.list || [];
+  const waitCount = list.filter(r => r.status === "待機中").length;
+  document.getElementById("waitCount").textContent = waitCount;
+
+  if (isWaiting) {
+    const mine = list.find(r => r.room == currentSelectedRoom && (r.status === "待機中" || r.status === "対応中"));
+    if (!mine) {
+      isWaiting = false;
+      unlockInputs();
+      document.getElementById("btnCancel").style.display = "none";
+      document.getElementById("waitPos").style.display = "none";
+      showStatus("success", "✨ 講師が対応を完了しました！");
+    } else if (mine.status === "対応中") {
+      document.getElementById("btnCancel").style.display = "none";
+      document.getElementById("waitPos").style.display = "none";
+      showStatus("success", "✨ 講師が対応を始めました！");
+    } else {
+      const waitingList = list.filter(r => r.status === "待機中");
+      const pos = waitingList.findIndex(r => r.room == currentSelectedRoom) + 1;
+      const posEl = document.getElementById("waitPos");
+      if (pos > 0) {
+        posEl.textContent = `あなたは現在 ${pos} 番目です`;
+        posEl.style.display = "block";
+      }
+    }
+  }
+});
+
+function unlockInputs() {
+  document.getElementById("btnHelp").disabled = false;
+  document.getElementById("selectPeriod").disabled = false;
+  document.getElementById("selectRoom").disabled = false;
+}
+
+function showStatus(type, text) {
+  const box = document.getElementById("statusBox");
+  box.textContent = text;
+  box.className = "status-box status-" + type;
+}
+</script>
+</body>
+</html>
