@@ -12,14 +12,17 @@ import socketio
 # ==========================================
 # 🛠️ サーバー & Socket.IO の初期設定
 # ==========================================
-sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
+sio = socketio.AsyncServer(
+    async_mode='asgi',
+    cors_allowed_origins='*',
+    max_http_packets_per_request=1000  # 💡 パケットの許容量を増やす設定を追加
+)
 app = FastAPI()
 asgi_app = socketio.ASGIApp(sio, app)
 
 DB_FILE = "help_system.db"
 CSV_DIR = "csv_logs"
 
-# CORS（クロスオリジンリソース共有）の設定
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -33,27 +36,51 @@ app.add_middleware(
 # 💾 データベース & ログ保存関連のロジック
 # ==========================================
 def init_db():
-    """データベースの初期化（初回起動時にテーブルを作成）"""
+    """データベースの初期化（初回起動時にテーブルを作成、および既存DBへのカラム追加）"""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS help_requests (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            class_id TEXT DEFAULT 'default',
-            timestamp TEXT,
-            room INTEGER,
-            period INTEGER DEFAULT 1,
-            name TEXT,
-            status TEXT,
-            completed_at TEXT
-        )
-    """)
+                   CREATE TABLE IF NOT EXISTS help_requests
+                   (
+                       id
+                       INTEGER
+                       PRIMARY
+                       KEY
+                       AUTOINCREMENT,
+                       class_id
+                       TEXT
+                       DEFAULT
+                       'default',
+                       timestamp
+                       TEXT,
+                       room
+                       INTEGER,
+                       period
+                       INTEGER
+                       DEFAULT
+                       1,
+                       name
+                       TEXT,
+                       status
+                       TEXT,
+                       completed_at
+                       TEXT
+                   )
+                   """)
+
+    # 💡 【自動拡張】過去のDBファイルが存在する場合に、新設する started_at（対応開始時刻）カラムを追加する
+    try:
+        cursor.execute("ALTER TABLE help_requests ADD COLUMN started_at TEXT DEFAULT ''")
+    except sqlite3.OperationalError:
+        # 既にカラムが存在する場合は何もしない
+        pass
+
     conn.commit()
     conn.close()
 
 
 def export_to_csv():
-    """溜まったデータをCSVファイルとして外部フォルダに自動保存する"""
+    """溜まったデータをCSVファイルとして外部フォルダに自動保存する（分析用カラム含む）"""
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
@@ -65,22 +92,27 @@ def export_to_csv():
         return
 
     os.makedirs(CSV_DIR, exist_ok=True)
-    date_str = datetime.now().strftime("%Y-%m-%d")
+    jst = timezone(timedelta(hours=9))
+    date_str = datetime.now(jst).strftime("%Y-%m-%d")
     csv_filename = f"{CSV_DIR}/help_log_{date_str}.csv"
 
     with open(csv_filename, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f)
-        writer.writerow(["ID", "クラスID", "受付時刻", "ルーム番号", "時限（限目）", "お名前", "ステータス", "完了時刻"])
+        writer.writerow(
+            ["ID", "クラスID", "受付時刻", "対応開始時刻", "完了時刻", "ルーム番号", "時限", "お名前", "ステータス"])
         for row in rows:
+            # カラムが古い可能性を考慮して辞書型安全取得
+            started_at = row["started_at"] if "started_at" in row.keys() else ""
             writer.writerow([
-                row["id"], row["class_id"], row["timestamp"], row["room"],
-                row["period"], row["name"], row["status"], row["completed_at"]
+                row["id"], row["class_id"], row["timestamp"], started_at,
+                row["completed_at"], row["room"], row["period"], row["name"], row["status"]
             ])
 
 
 def cleanup_old_data():
     """夜0時〜0時5分の間にアクセスがあった場合、前日のデータをCSVに退避してDBを空にする"""
-    current_time_str = datetime.now().strftime("%H:%M")
+    jst = timezone(timedelta(hours=9))
+    current_time_str = datetime.now(jst).strftime("%H:%M")
     if "00:00" <= current_time_str <= "00:05":
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
@@ -91,13 +123,11 @@ def cleanup_old_data():
 
 
 def get_current_list(class_id: str):
-    """指定されたクラスID（部屋）の有効なヘルプ一覧を取得する（完了後5分以内のデータを含む）"""
+    """指定されたクラスID（部屋）の有効なヘルプ一覧を取得する"""
     cleanup_old_data()
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
-
-    # 指定クラスのデータを全取得
     cursor.execute("""
                    SELECT *
                    FROM help_requests
@@ -107,30 +137,23 @@ def get_current_list(class_id: str):
     rows = cursor.fetchall()
     conn.close()
 
-    now = datetime.now()
+    jst = timezone(timedelta(hours=9))
+    now = datetime.now(jst)
     valid_rows = []
 
     for row in rows:
-        # 💡 安全ガード：「待機中」や「対応中」は時間計算を一切せず、100%絶対に画面に表示する
         if row["status"] in ["待機中", "対応中"]:
             valid_rows.append(row)
             continue
 
-        # 「対応済み」の場合のみ処理
         if row["status"] == "対応済み":
             if not row["completed_at"]:
                 continue
-
             try:
-                # 💡 【時差バグの完全修正】
-                # サーバーの時刻(now)とデータに刻まれた完了時刻(completed_at)を比較
-                comp_time = datetime.strptime(f"{now.strftime('%Y-%m-%d')} {row['completed_at']}", "%Y-%m-%d %H:%M:%S")
+                comp_time = datetime.strptime(f"{now.strftime('%Y-%m-%d')} {row['completed_at']}",
+                                              "%Y-%m-%d %H:%M:%S").replace(tzinfo=jst)
                 diff_seconds = (now - comp_time).total_seconds()
-
-                # タイムゾーンのズレで秒数がマイナス（未来）やプラスに大きく振れた場合の絶対値ガード
-                # サーバーとデータの時間軸を「5分以内（300秒以内）」として厳密にフィルタリング
-                # EC2がUTCの場合、時差が9時間(32400秒)出るため、その影響を受けないように絶対値の範囲を調整
-                if 0 <= diff_seconds < 300 or -300 < diff_seconds <= 0 or (32400 <= diff_seconds < 32700):
+                if 0 <= diff_seconds < 300:
                     valid_rows.append(row)
             except ValueError:
                 pass
@@ -139,6 +162,7 @@ def get_current_list(class_id: str):
         "rowIndex": row["id"],
         "classId": row["class_id"],
         "timestamp": row["timestamp"],
+        "startedAt": row["started_at"] if "started_at" in row.keys() else "",
         "room": row["room"],
         "period": row["period"],
         "name": row["name"],
@@ -147,7 +171,6 @@ def get_current_list(class_id: str):
     } for row in valid_rows]
 
 
-# 💡 【重要】プログラム読み込み時に強制的にテーブルを作成・チェックする安全装置
 init_db()
 
 
@@ -156,37 +179,68 @@ init_db()
 # ==========================================
 @app.get('/student', response_class=HTMLResponse)
 def get_student_page():
-    try:
-        with open("student.html", "r", encoding="utf-8") as f:
-            return HTMLResponse(content=f.read(), status_code=200)
-    except FileNotFoundError:
-        return HTTPException(status_code=404, detail="「student.html」ファイルが見つかりません。")
+    with open("student.html", "r", encoding="utf-8") as f:
+        return HTMLResponse(content=f.read(), status_code=200)
 
 
 @app.get('/teacher', response_class=HTMLResponse)
 def get_teacher_page():
-    try:
-        with open("teacher.html", "r", encoding="utf-8") as f:
-            return HTMLResponse(content=f.read(), status_code=200)
-    except FileNotFoundError:
-        return HTTPException(status_code=404, detail="「teacher.html」ファイルが見つかりません。")
+    with open("teacher.html", "r", encoding="utf-8") as f:
+        return HTMLResponse(content=f.read(), status_code=200)
 
 
 @app.get('/teacher/csv-history', response_class=HTMLResponse)
 def get_csv_history_page():
+    with open("csv_history.html", "r", encoding="utf-8") as f:
+        return HTMLResponse(content=f.read(), status_code=200)
+
+
+# 💡 【新設】分析・統計画面への配信ルーティング
+@app.get('/teacher/analytics', response_class=HTMLResponse)
+def get_analytics_page():
     try:
-        with open("csv_history.html", "r", encoding="utf-8") as f:
+        with open("analytics.html", "r", encoding="utf-8") as f:
             return HTMLResponse(content=f.read(), status_code=200)
     except FileNotFoundError:
-        return HTTPException(status_code=404, detail="「csv_history.html」ファイルが見つかりません。")
+        return HTMLResponse(content="<h3>「analytics.html」ファイルが見つかりません。</h3>", status_code=404)
 
 
 # ==========================================
-# 📊 データ管理・CSV操作用 APIエンドポイント
+# 📊 データ管理・分析用 APIエンドポイント
 # ==========================================
+# 💡 【新設】特定のクラス・指定時限のすべての生データを取得する集計用API
+@app.get('/api/analytics-data')
+def get_analytics_data(classId: str = "default", period: str = "all"):
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    if period == "all":
+        cursor.execute("SELECT * FROM help_requests WHERE class_id = ? ORDER BY id ASC", (classId,))
+    else:
+        cursor.execute("SELECT * FROM help_requests WHERE class_id = ? AND period = ? ORDER BY id ASC",
+                       (classId, int(period)))
+
+    rows = cursor.fetchall()
+    conn.close()
+
+    result = []
+    for row in rows:
+        result.append({
+            "id": row["id"],
+            "timestamp": row["timestamp"],
+            "started_at": row["started_at"] if "started_at" in row.keys() else "",
+            "completed_at": row["completed_at"],
+            "room": row["room"],
+            "period": row["period"],
+            "name": row["name"],
+            "status": row["status"]
+        })
+    return result
+
+
 @app.get('/download_csv')
 def download_current_csv():
-    """現在のデータベース内にあるすべてのデータをその場でCSVダウンロードする"""
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
@@ -196,14 +250,17 @@ def download_current_csv():
 
     si = io.StringIO()
     cw = csv.writer(si)
-    cw.writerow(["ID", "クラスID", "受付時刻", "ルーム番号", "時限（限目）", "お名前", "ステータス", "完了時刻"])
+    cw.writerow(
+        ["ID", "クラスID", "受付時刻", "対応開始時刻", "完了時刻", "ルーム番号", "時限（限目）", "お名前", "ステータス"])
     for row in rows:
+        started_at = row["started_at"] if "started_at" in row.keys() else ""
         cw.writerow(
-            [row["id"], row["class_id"], row["timestamp"], row["room"], row["period"], row["name"], row["status"],
-             row["completed_at"]])
+            [row["id"], row["class_id"], row["timestamp"], started_at, row["completed_at"], row["room"], row["period"],
+             row["name"], row["status"]])
 
     output = io.BytesIO(si.getvalue().encode('utf-8-sig'))
-    time_str = datetime.now().strftime("%Y%m%d_%H%M")
+    jst = timezone(timedelta(hours=9))
+    time_str = datetime.now(jst).strftime("%Y%m%d_%H%M")
     return StreamingResponse(
         output,
         media_type="text/csv",
@@ -213,12 +270,11 @@ def download_current_csv():
 
 @app.get('/api/csv-files')
 def list_csv_files():
-    """csv_logs フォルダ内にある過去のCSVファイル一覧を返すAPI"""
     if not os.path.exists(CSV_DIR):
         return []
     files = glob.glob(os.path.join(CSV_DIR, "*.csv"))
     file_list = []
-    for f in sorted(files, reverse=True):  # 新しい日付順
+    for f in sorted(files, reverse=True):
         filename = os.path.basename(f)
         size = os.path.getsize(f)
         size_str = f"{size / 1024:.1f} KB" if size >= 1024 else f"{size} Bytes"
@@ -228,7 +284,6 @@ def list_csv_files():
 
 @app.get('/api/download-csv/{filename}')
 def download_past_csv(filename: str):
-    """過去の特定のCSVログファイルをダウンロードさせるAPI"""
     safe_filename = os.path.basename(filename)
     file_path = os.path.join(CSV_DIR, safe_filename)
     if not os.path.exists(file_path):
@@ -241,16 +296,13 @@ def download_past_csv(filename: str):
 # ==========================================
 @sio.event
 async def connect(sid, environ):
-    """最初の接続時は何もしない（画面からルーム入室要求が来るのを待つ）"""
     pass
 
 
 @sio.event
 async def join_class(sid, data):
-    """受講生や講師を、URLで指定された独立した部屋（クラスグループ）に所属させる"""
     class_id = data.get('classId', 'default')
-    await sio.enter_room(sid, class_id)  # Socket.IOのルーム機能を利用
-    # 接続した人に対して、そのクラスの最新データだけを返す
+    await sio.enter_room(sid, class_id)
     await sio.emit('update_data', {'list': get_current_list(class_id)}, to=sid)
 
 
@@ -261,7 +313,6 @@ async def request_help(sid, data):
     period = int(data.get('period', 1))
     name = data.get('name', '').strip()
 
-    # 💡 WITHステートメントを使うことで、ローカルPCのディスクへの書き込みとコミットを100%強制・保証します
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -274,19 +325,18 @@ async def request_help(sid, data):
         jst = timezone(timedelta(hours=9))
         now_str = datetime.now(jst).strftime("%H:%M:%S")
 
+        # started_at の初期値は空文字
         cursor.execute(
-            "INSERT INTO help_requests (class_id, timestamp, room, period, name, status, completed_at) VALUES (?, ?, ?, ?, ?, '待機中', '')",
+            "INSERT INTO help_requests (class_id, timestamp, room, period, name, status, completed_at, started_at) VALUES (?, ?, ?, ?, ?, '待機中', '', '')",
             (class_id, now_str, room, period, name))
-        conn.commit()  # 確実に保存
+        conn.commit()
 
-    # 💡 データベースを完全に閉じた直後に、最新リストを全員に送る
     await sio.emit('update_data', {'list': get_current_list(class_id)}, room=class_id)
     await sio.emit('help_response', {'ok': True}, to=sid)
 
 
 @sio.event
 async def request_cancel(sid, data):
-    """受講生からのヘルプ取り消し（キャンセル）要求"""
     class_id = data.get('classId', 'default')
     room = int(data.get('room'))
     conn = sqlite3.connect(DB_FILE)
@@ -299,12 +349,16 @@ async def request_cancel(sid, data):
 
 @sio.event
 async def request_progress(sid, data):
-    """講師による「▶ 対応中にする」操作"""
     class_id = data.get('classId', 'default')
     row_index = int(data.get('rowIndex'))
+
+    # 💡 【機能拡張】対応中にした瞬間の「日本時間」を started_at カラムに記録する
+    jst = timezone(timedelta(hours=9))
+    now_str = datetime.now(jst).strftime("%H:%M:%S")
+
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute("UPDATE help_requests SET status = '対応中' WHERE id = ?", (row_index,))
+    cursor.execute("UPDATE help_requests SET status = '対応中', started_at = ? WHERE id = ?", (now_str, row_index))
     conn.commit()
     conn.close()
     await sio.emit('update_data', {'list': get_current_list(class_id)}, room=class_id)
@@ -312,13 +366,23 @@ async def request_progress(sid, data):
 
 @sio.event
 async def request_done(sid, data):
-    """講師による「✅ 対応済みにする」操作"""
     class_id = data.get('classId', 'default')
     row_index = int(data.get('rowIndex'))
-    now_str = datetime.now().strftime("%H:%M:%S")
+    jst = timezone(timedelta(hours=9))
+    now_str = datetime.now(jst).strftime("%H:%M:%S")
+
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute("UPDATE help_requests SET status = '対応済み', completed_at = ? WHERE id = ?", (now_str, row_index))
+    # 💡 対応開始（started_at）が未記録だった場合の安全ガード処理
+    cursor.execute("SELECT started_at FROM help_requests WHERE id = ?", (row_index,))
+    current_start = cursor.fetchone()[0]
+    if not current_start:
+        cursor.execute("UPDATE help_requests SET status = '対応済み', started_at = ?, completed_at = ? WHERE id = ?",
+                       (now_str, now_str, row_index))
+    else:
+        cursor.execute("UPDATE help_requests SET status = '対応済み', completed_at = ? WHERE id = ?",
+                       (now_str, row_index))
+
     conn.commit()
     conn.close()
     await sio.emit('update_data', {'list': get_current_list(class_id)}, room=class_id)
@@ -326,7 +390,6 @@ async def request_done(sid, data):
 
 @sio.event
 async def check_timeout(sid, data=None):
-    """画面側のカウントダウンタイマーと同調して定期実行される生存確認"""
     if data is None or not isinstance(data, dict):
         class_id = 'default'
     else:
@@ -334,27 +397,8 @@ async def check_timeout(sid, data=None):
     await sio.emit('update_data', {'list': get_current_list(class_id)}, to=sid)
 
 
-# ==========================================
-# 🚀 サーバーの起動
-# ==========================================
 if __name__ == '__main__':
-    # 起動時の古いデータクリーンアップ（もし前日のデータが残っていればCSVに保存して空にする）
-    # ※init_db()は上に移動したため、ここでは生存チェックとクリーンアップのみを行います
-    if os.path.exists(DB_FILE):
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        try:
-            cursor.execute("SELECT COUNT(*) FROM help_requests")
-            if cursor.fetchone()[0] > 0:
-                export_to_csv()
-                cursor.execute("DELETE FROM help_requests")
-                conn.commit()
-        except sqlite3.OperationalError:
-            pass
-        finally:
-            conn.close()
-
     import uvicorn
 
-    print("🚀 ローカル環境でヘルプシステムを起動します。")
+    print("🚀 ローカル環境でヘルプ分析対応版システムを起動します。")
     uvicorn.run("app:asgi_app", host="0.0.0.0", port=8000, factory=False)

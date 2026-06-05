@@ -66,6 +66,7 @@ tbody tr{border-bottom:1px solid #334155;background:#1e293b;}
     </select>
     <a href="/teacher/csv-history" class="btn-csv" style="background:#3b82f6;">📋 過去の履歴一覧</a>
     <a href="/download_csv" class="btn-csv">📥 データをCSV出力</a>
+    <a href="#" id="btnAnalytics" class="btn-csv" style="background:#8b5cf6;">📊 稼働状況の統計分析</a>
     <span class="badge badge-refresh">● リアルタイム同期中</span>
     <span class="badge badge-count">待機件数: <span id="waitCount">0</span> 件</span>
     <span style="font-size:12px;color:#64748b" id="lastUpdate">最終更新: —</span>
@@ -98,6 +99,8 @@ let latestFullList = [];
 
 // 💡 ページの読み込みが完了した時の処理
 window.addEventListener("load", () => {
+  // 💡 teacher.html の window.addEventListener("load", () => { ... の中に追記
+  document.getElementById("btnAnalytics").href = `/teacher/analytics?class=${classId}`;
   document.getElementById("mainTitle").textContent = `ヘルプ管理（部屋: ${classId}）`;
   socket.emit('join_class', { classId: classId });
 

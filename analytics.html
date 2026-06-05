@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ヘルプ状況 分析・統計・グラフ</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Helvetica Neue',Arial,sans-serif;background:#0f172a;color:#e2e8f0;padding:20px;}
+header{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;flex-wrap:wrap;gap:12px;}
+header h1{font-size:20px;font-weight:700;}
+.nav-links{display:flex;gap:10px;}
+.btn-nav{background:#334155;color:#fff;border:none;padding:6px 14px;border-radius:20px;font-size:13px;font-weight:700;cursor:pointer;text-decoration:none;}
+.btn-nav:hover{background:#475569;}
+.select-period{background:#1e293b;color:#e2e8f0;border:1px solid #475569;padding:6px 12px;border-radius:20px;font-size:13px;font-weight:600;outline:none;cursor:pointer;}
+.grid-container{display:grid;grid-template-columns:1fr;gap:24px;margin-bottom:24px;}
+.section-card{background:#1e293b;border-radius:8px;padding:20px;box-shadow:0 4px 6px -1px rgba(0,0,0,0.1);}
+.section-card h2{font-size:16px;font-weight:700;margin-bottom:16px;color:#38bdf8;border-bottom:1px solid #334155;padding-bottom:8px;}
+table{width:100%;border-collapse:collapse;font-size:13px;margin-top:8px;}
+thead tr{background:#0f172a;color:#94a3b8;border-bottom:2px solid #334155}
+th,td{padding:10px 14px;text-align:left;}
+tbody tr{border-bottom:1px solid #334155;background:#1e293b;}
+tbody tr:hover{background:#24334d;}
+.room-chip{background:#38bdf8;color:#0369a1;padding:2px 8px;border-radius:4px;font-weight:700;}
+.status-badge{display:inline-block;padding:2px 6px;border-radius:4px;font-size:11px;font-weight:700}
+.status-waiting{background:#fef3c7;color:#d97706}
+.status-progress{background:#dbeafe;color:#2563eb}
+.status-done{background:#d1fae5;color:#059669}
+.highlight-time{font-weight:600;color:#f43f5e;}
+.empty-state{text-align:center;padding:4px 0;color:#64748b;font-size:14px;}
+/* 💡 グラフエリアのレスポンシブサイズ調整 */
+.chart-container{position:relative;width:100%;height:320px;margin-top:10px;}
+</style>
+</head>
+<body>
+<header>
+  <h1 id="mainTitle">ヘルプ統計分析（部屋: 加盟中...）</h1>
+  <div class="nav-links">
+    <select id="filterPeriod" class="select-period" onchange="loadAnalyticsData()">
+      <option value="all">🌐 すべての時限を集計</option>
+      <option value="1">1 限目のみ</option>
+      <option value="2">2 限目のみ</option>
+      <option value="3">3 限目のみ</option>
+      <option value="4">4 限目のみ</option>
+      <option value="5">5 限目のみ</option>
+      <option value="6">6 限目のみ</option>
+      <option value="7">7 限目のみ</option>
+      <option value="8">8 限目のみ</option>
+    </select>
+    <a href="/teacher" id="backToTeacher" class="btn-nav">◀ 管理画面に戻る</a>
+  </div>
+</header>
+
+<div class="grid-container">
+  <div class="section-card">
+    <h2>📊 時限別のヘルプ需要と平均待ち時間（複合分析）</h2>
+    <div class="chart-container">
+      <canvas id="mixedChart"></canvas>
+    </div>
+  </div>
+
+  <div class="section-card">
+    <h2>🏫 ルームごとのヘルプ統計・稼働分析</h2>
+    <div class="empty-state" id="summaryEmpty" style="display:none">該当するデータがありません。</div>
+    <table id="summaryTable">
+      <thead>
+        <tr>
+          <th>場所</th>
+          <th>総ヘルプ件数</th>
+          <th>対応待ち(件)</th>
+          <th>平均呼出間隔</th>
+          <th>①平均呼出〜対応中 (待ち時間)</th>
+          <th>②平均対応中〜完了 (指導時間)</th>
+        </tr>
+      </thead>
+      <tbody id="summaryBody"></tbody>
+    </table>
+  </div>
+
+  <div class="section-card">
+    <h2>⏱️ 各ヘルプ要請のタイムライン詳細ログ</h2>
+    <div class="empty-state" id="logEmpty" style="display:none">該当するログデータがありません。</div>
+    <table id="logTable">
+      <thead>
+        <tr>
+          <th style="width:50px">ID</th>
+          <th>時限</th>
+          <th>場所</th>
+          <th>お名前</th>
+          <th>状態</th>
+          <th>ヘルプ検知</th>
+          <th>①検知〜対応中</th>
+          <th>②対応中〜完了</th>
+          <th>③検知〜完了(合計)</th>
+        </tr>
+      </thead>
+      <tbody id="logBody"></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+const urlParams = new URLSearchParams(window.location.search);
+const classId = urlParams.get("class") || "default";
+let mixedChartInstance = null; // グラフのインスタンス保持用
+
+window.addEventListener("load", () => {
+  document.getElementById("mainTitle").textContent = `ヘルプ統計分析（部屋: ${classId}）`;
+  document.getElementById("backToTeacher").href = `/teacher?class=${classId}`;
+  loadAnalyticsData();
+});
+
+function timeToSeconds(hms) {
+  if (!hms) return null;
+  const p = hms.split(':');
+  return parseInt(p[0], 10) * 3600 + parseInt(p[1], 10) * 60 + parseInt(p[2], 10);
+}
+
+function formatDuration(sec) {
+  if (sec === null || isNaN(sec)) return "—";
+  if (sec < 0) return "0秒";
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  return m > 0 ? `${m}分${s}秒` : `${s}秒`;
+}
+
+async function loadAnalyticsData() {
+  const period = document.getElementById("filterPeriod").value;
+  try {
+    const response = await fetch(`/api/analytics-data?classId=${classId}&period=${period}`);
+    const data = await response.json();
+
+    // 💡 統計グラフの描画を実行
+    renderMixedChart(data);
+
+    renderSummaryTable(data);
+    renderLogTable(data);
+  } catch (error) {
+    console.error("データの取得に失敗しました:", error);
+  }
+}
+
+// 💡 【新設】時限ごとの複合グラフ描画ロジック
+function renderMixedChart(data) {
+  // 1限目〜8限目までの集計バケットを用意
+  const periods = [1, 2, 3, 4, 5, 6, 7, 8];
+  const helpCounts = [0, 0, 0, 0, 0, 0, 0, 0];
+  const totalWaitTimes = [0, 0, 0, 0, 0, 0, 0, 0];
+  const waitCountMap = [0, 0, 0, 0, 0, 0, 0, 0];
+
+  data.forEach(item => {
+    const pIdx = periods.indexOf(item.period);
+    if (pIdx !== -1) {
+      helpCounts[pIdx] += 1; // 件数カウント
+
+      if (item.timestamp && item.started_at) {
+        const tSec = timeToSeconds(item.timestamp);
+        const sSec = timeToSeconds(item.started_at);
+        const diff = sSec - tSec;
+        if (diff >= 0) {
+          totalWaitTimes[pIdx] += diff;
+          waitCountMap[pIdx] += 1;
+        }
+      }
+    }
+  });
+
+  // 各時限の平均待ち時間（分単位）を算出
+  const avgWaitMinutes = totalWaitTimes.map((totalSec, idx) => {
+    if (waitCountMap[idx] === 0) return 0;
+    const avgSec = totalSec / waitCountMap[idx];
+    return parseFloat((avgSec / 60).toFixed(2)); // 分に直して小数第二位まで
+  });
+
+  const ctx = document.getElementById('mixedChart').getContext('2d');
+
+  // 既にグラフが存在する場合は一度破棄（切り替え時のバグ防止）
+  if (mixedChartInstance) {
+    mixedChartInstance.destroy();
+  }
+
+  // Chart.js 複合グラフ構築
+  mixedChartInstance = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: periods.map(p => `${p}限目`),
+      datasets: [
+        {
+          label: '平均待ち時間 (分)',
+          type: 'line', // 折れ線グラフ
+          data: avgWaitMinutes,
+          borderColor: '#f43f5e',
+          borderWidth: 3,
+          backgroundColor: '#f43f5e',
+          pointRadius: 4,
+          fill: false,
+          yAxisID: 'yAxisWait', // 右側Y軸
+          tension: 0.2
+        },
+        {
+          label: 'ヘルプ要請件数 (件)',
+          type: 'bar', // 縦棒グラフ
+          data: helpCounts,
+          backgroundColor: 'rgba(56, 189, 248, 0.6)',
+          borderColor: '#38bdf8',
+          borderWidth: 1,
+          yAxisID: 'yAxisCount' // 左側Y軸
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { labels: { color: '#e2e8f0' } }
+      },
+      scales: {
+        x: {
+          ticks: { color: '#94a3b8' },
+          grid: { color: '#334155' }
+        },
+        yAxisCount: {
+          type: 'linear',
+          position: 'left',
+          title: { display: true, text: 'ヘルプ件数 (件)', color: '#38bdf8' },
+          ticks: { color: '#38bdf8', stepSize: 1 },
+          grid: { color: '#334155' },
+          min: 0
+        },
+        yAxisWait: {
+          type: 'linear',
+          position: 'right',
+          title: { display: true, text: '平均待ち時間 (分)', color: '#f43f5e' },
+          ticks: { color: '#f43f5e' },
+          grid: { drawOnChartArea: false }, // グリッド線が重ならないようにする
+          min: 0
+        }
+      }
+    }
+  });
+}
+
+// ルーム別の統計集計ロジック
+function renderSummaryTable(data) {
+  const tbody = document.getElementById("summaryBody");
+  const empty = document.getElementById("summaryEmpty");
+  const table = document.getElementById("summaryTable");
+
+  if (data.length === 0) {
+    tbody.innerHTML = "";
+    table.style.display = "none";
+    empty.style.display = "block";
+    return;
+  }
+  table.style.display = "table";
+  empty.style.display = "none";
+
+  const roomMetrics = {};
+
+  data.forEach(item => {
+    const r = item.room;
+    if (!roomMetrics[r]) {
+      roomMetrics[r] = {
+        room: r,
+        totalCount: 0,
+        waitingCount: 0,
+        timestamps: [],
+        waitTimes: [],
+        progressTimes: []
+      };
+    }
+
+    roomMetrics[r].totalCount += 1;
+    if (item.status === "待機中") roomMetrics[r].waitingCount += 1;
+
+    const tSec = timeToSeconds(item.timestamp);
+    if (tSec !== null) roomMetrics[r].timestamps.push(tSec);
+
+    if (item.started_at && item.timestamp) {
+      const sSec = timeToSeconds(item.started_at);
+      const diffWait = sSec - tSec;
+      if (diffWait >= 0) roomMetrics[r].waitTimes.push(diffWait);
+    }
+
+    if (item.completed_at && item.started_at) {
+      const sSec = timeToSeconds(item.started_at);
+      const cSec = timeToSeconds(item.completed_at);
+      const diffProg = cSec - sSec;
+      if (diffProg >= 0) roomMetrics[r].progressTimes.push(diffProg);
+    }
+  });
+
+  const sortedRooms = Object.values(roomMetrics).sort((a, b) => a.room - b.room);
+
+  tbody.innerHTML = sortedRooms.map(m => {
+    let avgIntervalStr = "—";
+    if (m.timestamps.length > 1) {
+      m.timestamps.sort((a, b) => a - b);
+      let totalInterval = 0;
+      for (let i = 1; i < m.timestamps.length; i++) {
+        totalInterval += (m.timestamps[i] - m.timestamps[i-1]);
+      }
+      const avgInt = totalInterval / (m.timestamps.length - 1);
+      avgIntervalStr = formatDuration(avgInt);
+    }
+
+    const avgWait = m.waitTimes.length > 0 ? m.waitTimes.reduce((a,b)=>a+b, 0) / m.waitTimes.length : null;
+    const avgProg = m.progressTimes.length > 0 ? m.progressTimes.reduce((a,b)=>a+b, 0) / m.progressTimes.length : null;
+
+    return `<tr>
+      <td><span class="room-chip">ルーム ${m.room}</span></td>
+      <td style="font-weight:bold">${m.totalCount} 件</td>
+      <td style="color:${m.waitingCount > 0 ? '#ef4444' : '#e2e8f0'}; font-weight:bold">${m.waitingCount} 件</td>
+      <td>${avgIntervalStr}</td>
+      <td class="highlight-time">${formatDuration(avgWait)}</td>
+      <td style="color:#60a5fa; font-weight:600">${formatDuration(avgProg)}</td>
+    </tr>`;
+  }).join("");
+}
+
+// 個別リクエストのタイムライン詳細一覧
+function renderLogTable(data) {
+  const tbody = document.getElementById("logBody");
+  const empty = document.getElementById("logEmpty");
+  const table = document.getElementById("logTable");
+
+  if (data.length === 0) {
+    tbody.innerHTML = "";
+    table.style.display = "none";
+    empty.style.display = "block";
+    return;
+  }
+  table.style.display = "table";
+  empty.style.display = "none";
+
+  const reversedData = [...data].reverse();
+
+  tbody.innerHTML = reversedData.map(item => {
+    const tSec = timeToSeconds(item.timestamp);
+    const sSec = timeToSeconds(item.started_at);
+    const cSec = timeToSeconds(item.completed_at);
+
+    let waitStr = "—";
+    let progStr = "—";
+    let totalStr = "—";
+
+    if (tSec !== null && sSec !== null) {
+      waitStr = formatDuration(sSec - tSec);
+    }
+    if (sSec !== null && cSec !== null) {
+      progStr = formatDuration(cSec - sSec);
+    }
+    if (tSec !== null && cSec !== null) {
+      totalStr = formatDuration(cSec - tSec);
+    }
+
+    const statusCls = item.status === "待機中" ? "status-waiting" : item.status === "対応中" ? "status-progress" : "status-done";
+
+    return `<tr>
+      <td style="color:#64748b">${item.id}</td>
+      <td>${item.period} 限目</td>
+      <td><span class="room-chip">ルーム ${item.room}</span></td>
+      <td>${String(item.name || "（未入力）")}</td>
+      <td><span class="status-badge ${statusCls}">${item.status}</span></td>
+      <td style="color:#94a3b8">${item.timestamp}</td>
+      <td class="highlight-time">${waitStr}</td>
+      <td style="color:#60a5fa">${progStr}</td>
+      <td style="font-weight:bold; color:#10b981">${totalStr}</td>
+    </tr>`;
+  }).join("");
+}
+</script>
+</body>
+</html>
