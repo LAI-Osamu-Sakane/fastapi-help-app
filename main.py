@@ -196,12 +196,12 @@ def do_done(rowIndex: int = Query(...)):
     conn.close()
     return {"ok": True}
 
-# http://localhost:8000/student にアクセスしたら「受講生.html」を返す
+# http://localhost:8000/student にアクセスしたら「student.html」を返す
 @app.get("/student")
 def get_student_page():
-    return FileResponse("受講生.html")
+    return FileResponse("student.html")
 
-# http://localhost:8000/teacher にアクセスしたら「講師用.html」を返す
+# http://localhost:8000/teacher にアクセスしたら「teacher.html」を返す
 @app.get("/teacher")
 def get_teacher_page():
-    return FileResponse("講師用.html")
+    return FileResponse("teacher.html")

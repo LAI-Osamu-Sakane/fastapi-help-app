@@ -130,19 +130,19 @@ init_db()
 @app.get('/student', response_class=HTMLResponse)
 def get_student_page():
     try:
-        with open("受講生.html", "r", encoding="utf-8") as f:
+        with open("student.html", "r", encoding="utf-8") as f:
             return HTMLResponse(content=f.read(), status_code=200)
     except FileNotFoundError:
-        return HTTPException(status_code=404, detail="「受講生.html」ファイルが見つかりません。")
+        return HTTPException(status_code=404, detail="「student.html」ファイルが見つかりません。")
 
 
 @app.get('/teacher', response_class=HTMLResponse)
 def get_teacher_page():
     try:
-        with open("講師用.html", "r", encoding="utf-8") as f:
+        with open("teacher.html", "r", encoding="utf-8") as f:
             return HTMLResponse(content=f.read(), status_code=200)
     except FileNotFoundError:
-        return HTTPException(status_code=404, detail="「講師用.html」ファイルが見つかりません。")
+        return HTTPException(status_code=404, detail="「teacher.html」ファイルが見つかりません。")
 
 
 @app.get('/teacher/csv-history', response_class=HTMLResponse)
