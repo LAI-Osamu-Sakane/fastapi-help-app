@@ -96,16 +96,53 @@ def get_current_list(class_id: str):
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
-    cursor.execute("""
-                   SELECT *
-                   FROM help_requests
-                   WHERE class_id = ?
-                     AND (
-                       status != '対応済み' 
-           OR (status = '対応済み' AND (strftime('%s', 'now', 'localtime') - strftime('%s', strftime('%Y-%m-%d ', 'now', 'localtime') || completed_at)) < 300)
-                       )
-                   ORDER BY CASE status WHEN '対応中' THEN 1 WHEN '待機中' THEN 2 WHEN '対応済み' THEN 3 END ASC, id ASC
-                   """, (class_id,))
+
+    def get_current_list(class_id: str):
+        """指定されたクラスID（部屋）の有効なヘルプ一覧を取得する（完了後5分以内のデータを含む）"""
+        cleanup_old_data()
+        conn = sqlite3.connect(DB_FILE)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        # 📝 SQLでは条件をシンプルに「対応済み以外」または「対応済みすべて」を取得
+        cursor.execute("""
+                       SELECT *
+                       FROM help_requests
+                       WHERE class_id = ?
+                       ORDER BY CASE status WHEN '対応中' THEN 1 WHEN '待機中' THEN 2 WHEN '対応済み' THEN 3 END ASC, id ASC
+                       """, (class_id,))
+        rows = cursor.fetchall()
+        conn.close()
+
+        # 📝 Python側で、現在時刻と対応済み時刻の差分を正確に計算してフィルタリング（5分＝300秒）
+        now = datetime.now()
+        valid_rows = []
+
+        for row in rows:
+            if row["status"] == "対応済み":
+                if row["completed_at"]:
+                    try:
+                        # completed_at ("HH:MM:SS") を本日の日付と結合してdatetimeオブジェクトに変換
+                        comp_time = datetime.strptime(f"{now.strftime('%Y-%m-%d')} {row['completed_at']}",
+                                                      "%Y-%m-%d %H:%M:%S")
+                        # 差分が300秒（5分）を超えていたら画面に流さない（スキップ）
+                        if (now - comp_time).total_seconds() >= 300:
+                            continue
+                    except ValueError:
+                        pass
+            valid_rows.append(row)
+
+        return [{
+            "rowIndex": row["id"],
+            "classId": row["class_id"],
+            "timestamp": row["timestamp"],
+            "room": row["room"],
+            "period": row["period"],
+            "name": row["name"],
+            "status": row["status"],
+            "completedAt": row["completed_at"]
+        } for row in valid_rows]
+
     rows = cursor.fetchall()
     conn.close()
     return [{
