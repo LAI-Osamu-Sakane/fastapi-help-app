@@ -90,7 +90,7 @@ window.addEventListener("load", () => {
   // 定期的な同期
   setInterval(() => {
     socket.emit('check_timeout', { classId: classId });
-  }, 1000);
+  }, 5000);
 });
 
 function doHelp() {
@@ -135,33 +135,38 @@ function doCancel() {
 }
 
 socket.on('update_data', (data) => {
-  const list = data.list || [];
-  const waitCount = list.filter(r => r.status === "待機中").length;
-  document.getElementById("waitCount").textContent = waitCount;
+ const list = data.list || [];
+ const waitCount = list.filter(r => r.status === "待機中").length;
+ document.getElementById("waitCount").textContent = waitCount;
 
-  if (isWaiting) {
-    const mine = list.find(r => r.room == currentSelectedRoom && (r.status === "待機中" || r.status === "対応中"));
-    if (!mine) {
-      isWaiting = false;
-      unlockInputs();
-      document.getElementById("btnCancel").style.display = "none";
-      document.getElementById("waitPos").style.display = "none";
-      showStatus("success", "✨ 講師が対応を完了しました！");
-    } else if (mine.status === "対応中") {
-      document.getElementById("btnCancel").style.display = "none";
-      document.getElementById("waitPos").style.display = "none";
-      showStatus("success", "✨ 講師が対応を始めました！");
-    } else {
-      const waitingList = list.filter(r => r.status === "待機中");
-      const pos = waitingList.findIndex(r => r.room == currentSelectedRoom) + 1;
-      const posEl = document.getElementById("waitPos");
-      if (pos > 0) {
-        posEl.textContent = `あなたは現在 ${pos} 番目です`;
-        posEl.style.display = "block";
-      }
-    }
-  }
+ if (isWaiting) {
+   // 💡 【バグ修正】同じクラス(classId) かつ 同じルーム(room) で「待機中」または「対応中」のものを厳密に探す
+   const mine = list.find(r => r.classId === classId && r.room == currentSelectedRoom && (r.status === "待機中" || r.status === "対応中"));
+
+   if (!mine) {
+     // リストの中に自分のクラス＆ルームの有効なヘルプが「本当に無くなった」時だけ完了にする
+     isWaiting = false;
+     unlockInputs();
+     document.getElementById("btnCancel").style.display = "none";
+     document.getElementById("waitPos").style.display = "none";
+     showStatus("success", "✨ 講師が対応を完了しました！");
+   } else if (mine.status === "対応中") {
+     document.getElementById("btnCancel").style.display = "none";
+     document.getElementById("waitPos").style.display = "none";
+     showStatus("success", "✨ 講師が対応を始めました！");
+   } else {
+     // 自分が待機中の場合、同じクラス内の「待機中」の中での順番を計算する
+     const waitingList = list.filter(r => r.classId === classId && r.status === "待機中");
+     const pos = waitingList.findIndex(r => r.room == currentSelectedRoom) + 1;
+     const posEl = document.getElementById("waitPos");
+     if (pos > 0) {
+       posEl.textContent = `あなたは現在 ${pos} 番目です`;
+       posEl.style.display = "block";
+     }
+   }
+ }
 });
+
 
 function unlockInputs() {
   document.getElementById("btnHelp").disabled = false;

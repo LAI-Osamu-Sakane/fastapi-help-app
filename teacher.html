@@ -96,12 +96,16 @@ let audioCtx = null;
 const doneTimestamps = {};
 let latestFullList = [];
 
+// 💡 ページの読み込みが完了した時の処理
 window.addEventListener("load", () => {
   document.getElementById("mainTitle").textContent = `ヘルプ管理（部屋: ${classId}）`;
   socket.emit('join_class', { classId: classId });
+
+  // 1秒ごとにカウントダウン表示を更新する
   setInterval(updateCountdowns, 1000);
 });
 
+// 💡 サーバーから最新データを受け取った時の処理
 socket.on('update_data', (data) => {
   latestFullList = data.list || [];
   renderTable();
@@ -112,6 +116,7 @@ function onFilterChange() {
   renderTable();
 }
 
+// 💡 テーブルの描画処理（メインロジック）
 function renderTable() {
   const tbody = document.getElementById("helpBody");
   const empty = document.getElementById("emptyState");
@@ -127,8 +132,9 @@ function renderTable() {
   const totalWaitCount = latestFullList.filter(r => r.status === "待機中").length;
   document.getElementById("waitCount").textContent = totalWaitCount;
 
+  // 新しい待機ヘルプが増えたら音を鳴らす
   if (totalWaitCount > prevWaitCount) {
-    playBeep();
+    playBeep(); // 💡 ここでエラーが起きないように下部で確実に定義します
     document.title = `🔔 [${classId}] ヘルプ ${totalWaitCount}件`;
   } else if (totalWaitCount === 0) {
     document.title = `ヘルプ管理 [${classId}]`;
@@ -164,7 +170,9 @@ function renderTable() {
     } else if (isProgress) {
       btnHtml = `<button class="btn-action btn-done" onclick="doDone(${item.rowIndex}, this)">✅ 対応済みにする</button>`;
     } else if (isDone) {
-      if (!doneTimestamps[item.rowIndex] && item.completedAt) { doneTimestamps[item.rowIndex] = item.completedAt; }
+      if (!doneTimestamps[item.rowIndex] && item.completedAt) {
+        doneTimestamps[item.rowIndex] = item.completedAt;
+      }
       btnHtml = `<div><span style="color:#6ee7b7;font-size:12px">✅ 完了 ${item.completedAt || ""}</span><div class="countdown" id="cd-${item.rowIndex}"></div></div>`;
     }
 
@@ -182,9 +190,17 @@ function renderTable() {
   updateCountdowns();
 }
 
-function doProgress(rowIndex, btn) { btn.disabled = true; socket.emit('request_progress', { classId: classId, rowIndex: rowIndex }); }
-function doDone(rowIndex, btn) { btn.disabled = true; socket.emit('request_done', { classId: classId, rowIndex: rowIndex }); }
+function doProgress(rowIndex, btn) {
+  btn.disabled = true;
+  socket.emit('request_progress', { classId: classId, rowIndex: rowIndex });
+}
 
+function doDone(rowIndex, btn) {
+  btn.disabled = true;
+  socket.emit('request_done', { classId: classId, rowIndex: rowIndex });
+}
+
+// 💡 タイマーカウントダウン（時差吸収版）
 function updateCountdowns() {
   const rows = document.querySelectorAll("tr[data-status='対応済み']");
   rows.forEach(row => {
@@ -193,19 +209,59 @@ function updateCountdowns() {
     if (!cdEl) return;
     const completedStr = doneTimestamps[rowIndex];
     if (!completedStr) return;
+
     const today = new Date();
     const parts = completedStr.split(":");
     const completedDate = new Date(today.getFullYear(), today.getMonth(), today.getDate(), parseInt(parts[0]), parseInt(parts[1]), parseInt(parts[2]));
-    const elapsed = Date.now() - completedDate.getTime();
+
+    let elapsed = Date.now() - completedDate.getTime();
+
+    // 時差（9時間）の補正ガード
+    if (elapsed < 0 || elapsed > 5 * 60 * 1000) {
+      const diff9Hours = 9 * 60 * 60 * 1000;
+      if (Math.abs(elapsed - diff9Hours) < 5 * 60 * 1000) {
+        elapsed = elapsed - diff9Hours;
+      } else if (Math.abs(elapsed + diff9Hours) < 5 * 60 * 1000) {
+        elapsed = elapsed + diff9Hours;
+      }
+    }
+
     const remaining = (5 * 60 * 1000) - elapsed;
-    if (remaining > 0) {
-      const m = Math.floor(remaining / 60000); const s = Math.floor((remaining % 60000) / 1000);
+    if (remaining > 0 && remaining <= 5 * 60 * 1000) {
+      const m = Math.floor(remaining / 60000);
+      const s = Math.floor((remaining % 60000) / 1000);
       cdEl.textContent = `${m}分${s}秒後に画面から消えます`;
-    } else { cdEl.textContent = "まもなく削除されます"; }
+    } else {
+      cdEl.textContent = "まもなく削除されます";
+    }
   });
 }
-function playBeep() { if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)(); const osc = audioCtx.createOscillator(); const gain = audioCtx.createGain(); osc.connect(gain); gain.connect(audioCtx.destination); osc.type = "sine"; osc.frequency.setValueAtTime(880, audioCtx.currentTime); gain.gain.setValueAtTime(0.3, audioCtx.currentTime); gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.4); osc.start(); osc.stop(audioCtx.currentTime + 0.4); }
-function esc(s) { return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
+
+// 💡 【重要】ビープ音を鳴らす関数（エラー回避のために確実に定義）
+function playBeep() {
+  try {
+    if (!audioCtx) {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(880, audioCtx.currentTime);
+    gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.4);
+    osc.start();
+    osc.stop(audioCtx.currentTime + 0.4);
+  } catch (e) {
+    console.log("ブラウザのポリシーにより音声を再生できませんでした。");
+  }
+}
+
+function esc(s) {
+  return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+}
 </script>
+
 </body>
 </html>

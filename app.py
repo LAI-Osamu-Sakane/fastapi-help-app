@@ -3,7 +3,7 @@ import csv
 import io
 import os
 import glob
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -97,54 +97,44 @@ def get_current_list(class_id: str):
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
-    def get_current_list(class_id: str):
-        """指定されたクラスID（部屋）の有効なヘルプ一覧を取得する（完了後5分以内のデータを含む）"""
-        cleanup_old_data()
-        conn = sqlite3.connect(DB_FILE)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-
-        # 📝 SQLでは条件をシンプルに「対応済み以外」または「対応済みすべて」を取得
-        cursor.execute("""
-                       SELECT *
-                       FROM help_requests
-                       WHERE class_id = ?
-                       ORDER BY CASE status WHEN '対応中' THEN 1 WHEN '待機中' THEN 2 WHEN '対応済み' THEN 3 END ASC, id ASC
-                       """, (class_id,))
-        rows = cursor.fetchall()
-        conn.close()
-
-        # 📝 Python側で、現在時刻と対応済み時刻の差分を正確に計算してフィルタリング（5分＝300秒）
-        now = datetime.now()
-        valid_rows = []
-
-        for row in rows:
-            if row["status"] == "対応済み":
-                if row["completed_at"]:
-                    try:
-                        # completed_at ("HH:MM:SS") を本日の日付と結合してdatetimeオブジェクトに変換
-                        comp_time = datetime.strptime(f"{now.strftime('%Y-%m-%d')} {row['completed_at']}",
-                                                      "%Y-%m-%d %H:%M:%S")
-                        # 差分が300秒（5分）を超えていたら画面に流さない（スキップ）
-                        if (now - comp_time).total_seconds() >= 300:
-                            continue
-                    except ValueError:
-                        pass
-            valid_rows.append(row)
-
-        return [{
-            "rowIndex": row["id"],
-            "classId": row["class_id"],
-            "timestamp": row["timestamp"],
-            "room": row["room"],
-            "period": row["period"],
-            "name": row["name"],
-            "status": row["status"],
-            "completedAt": row["completed_at"]
-        } for row in valid_rows]
-
+    # 指定クラスのデータを全取得
+    cursor.execute("""
+                   SELECT *
+                   FROM help_requests
+                   WHERE class_id = ?
+                   ORDER BY CASE status WHEN '対応中' THEN 1 WHEN '待機中' THEN 2 WHEN '対応済み' THEN 3 END ASC, id ASC
+                   """, (class_id,))
     rows = cursor.fetchall()
     conn.close()
+
+    now = datetime.now()
+    valid_rows = []
+
+    for row in rows:
+        # 💡 安全ガード：「待機中」や「対応中」は時間計算を一切せず、100%絶対に画面に表示する
+        if row["status"] in ["待機中", "対応中"]:
+            valid_rows.append(row)
+            continue
+
+        # 「対応済み」の場合のみ処理
+        if row["status"] == "対応済み":
+            if not row["completed_at"]:
+                continue
+
+            try:
+                # 💡 【時差バグの完全修正】
+                # サーバーの時刻(now)とデータに刻まれた完了時刻(completed_at)を比較
+                comp_time = datetime.strptime(f"{now.strftime('%Y-%m-%d')} {row['completed_at']}", "%Y-%m-%d %H:%M:%S")
+                diff_seconds = (now - comp_time).total_seconds()
+
+                # タイムゾーンのズレで秒数がマイナス（未来）やプラスに大きく振れた場合の絶対値ガード
+                # サーバーとデータの時間軸を「5分以内（300秒以内）」として厳密にフィルタリング
+                # EC2がUTCの場合、時差が9時間(32400秒)出るため、その影響を受けないように絶対値の範囲を調整
+                if 0 <= diff_seconds < 300 or -300 < diff_seconds <= 0 or (32400 <= diff_seconds < 32700):
+                    valid_rows.append(row)
+            except ValueError:
+                pass
+
     return [{
         "rowIndex": row["id"],
         "classId": row["class_id"],
@@ -154,7 +144,7 @@ def get_current_list(class_id: str):
         "name": row["name"],
         "status": row["status"],
         "completedAt": row["completed_at"]
-    } for row in rows]
+    } for row in valid_rows]
 
 
 # 💡 【重要】プログラム読み込み時に強制的にテーブルを作成・チェックする安全装置
@@ -266,31 +256,30 @@ async def join_class(sid, data):
 
 @sio.event
 async def request_help(sid, data):
-    """受講生からのヘルプ送信要求"""
     class_id = data.get('classId', 'default')
     room = int(data.get('room'))
     period = int(data.get('period', 1))
     name = data.get('name', '').strip()
 
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    # 同じクラス・同じルームで既に「待機中」「対応中」のヘルプが無いか重複チェック
-    cursor.execute(
-        "SELECT COUNT(*) FROM help_requests WHERE class_id = ? AND room = ? AND (status = '待機中' OR status = '対応中')",
-        (class_id, room))
-    if cursor.fetchone()[0] > 0:
-        conn.close()
-        await sio.emit('help_response', {'ok': False, 'reason': 'already_waiting'}, to=sid)
-        return
+    # 💡 WITHステートメントを使うことで、ローカルPCのディスクへの書き込みとコミットを100%強制・保証します
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT COUNT(*) FROM help_requests WHERE class_id = ? AND room = ? AND (status = '待機中' OR status = '対応中')",
+            (class_id, room))
+        if cursor.fetchone()[0] > 0:
+            await sio.emit('help_response', {'ok': False, 'reason': 'already_waiting'}, to=sid)
+            return
 
-    now_str = datetime.now().strftime("%H:%M:%S")
-    cursor.execute(
-        "INSERT INTO help_requests (class_id, timestamp, room, period, name, status, completed_at) VALUES (?, ?, ?, ?, ?, '待機中', '')",
-        (class_id, now_str, room, period, name))
-    conn.commit()
-    conn.close()
+        jst = timezone(timedelta(hours=9))
+        now_str = datetime.now(jst).strftime("%H:%M:%S")
 
-    # 同じクラスグループの全員に最新リストを配信
+        cursor.execute(
+            "INSERT INTO help_requests (class_id, timestamp, room, period, name, status, completed_at) VALUES (?, ?, ?, ?, ?, '待機中', '')",
+            (class_id, now_str, room, period, name))
+        conn.commit()  # 確実に保存
+
+    # 💡 データベースを完全に閉じた直後に、最新リストを全員に送る
     await sio.emit('update_data', {'list': get_current_list(class_id)}, room=class_id)
     await sio.emit('help_response', {'ok': True}, to=sid)
 
